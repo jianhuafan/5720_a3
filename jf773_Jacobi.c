@@ -99,6 +99,45 @@ double diag_norm_2(double** mat, const int n) {
     return ret;
 }
 
+/* update one row of the matrix, distributed block of column to different processes and send the updated value to rank 0
+*/
+void update_row(double* row_i, double* row_j, double* row_i_updated, double* row_j_updated, MPI_Comm comm, const int n, int is_i, double c, double s) {
+    int row_rank = -1;
+    int row_size = -1;
+    int k;
+    if (comm != MPI_COMM_NULL) {
+        MPI_Comm_rank(comm, &row_rank);
+        MPI_Comm_size(comm, &row_size);
+        int block_size = n / row_size;
+        double* row_i_block = (double*) malloc(block_size * sizeof(double));
+        double* row_j_block = (double*) malloc(block_size * sizeof(double));
+        double* row_block_updated = (double*) malloc(block_size * sizeof(double));
+        MPI_Scatter(row_i, block_size, MPI_DOUBLE, row_i_block, block_size, MPI_DOUBLE, 0, comm);
+        MPI_Scatter(row_j, block_size, MPI_DOUBLE, row_j_block, block_size, MPI_DOUBLE, 0, comm);
+        for (k = 0; k < block_size; k++) {
+            if (is_i == 1) {
+                row_block_updated[k] = c * row_i_block[k] + s * row_j_block[k];
+            } else {
+                row_block_updated[k] = s * row_i_block[k] - c * row_j_block[k];
+            }
+        }
+        if (is_i == 1) {
+            MPI_Gather(row_block_updated, block_size, MPI_DOUBLE, row_i_updated, block_size, MPI_DOUBLE, 0, comm);
+            if (row_rank == 0) {
+                MPI_Send(row_i_updated, n, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+            }
+        } else {
+            MPI_Gather(row_block_updated, block_size, MPI_DOUBLE, row_j_updated, block_size, MPI_DOUBLE, 0, comm);
+            if (row_rank == 0) {
+                MPI_Send(row_j_updated, n, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+            }
+        }
+        free(row_i_block);
+        free(row_j_block);
+        free(row_block_updated);
+    }
+}
+
 /* Jacobi rotation for row i and row j, column i and column j
 */
 void jacobi_rotate(double** mat, int idx_i, int idx_j, const int n) {
@@ -168,59 +207,15 @@ void jacobi_rotate(double** mat, int idx_i, int idx_j, const int n) {
     MPI_Comm_create_group(MPI_COMM_WORLD, row_i_group, 0, &row_i_comm);
     MPI_Comm_create_group(MPI_COMM_WORLD, row_j_group, 0, &row_j_comm);
 
-    // update row i
-    int row_i_rank = -1;
-    int row_i_size = -1;
+    // update row i and row j
     double* row_i_updated = (double*) malloc(n * sizeof(double));
-    if (row_i_comm != MPI_COMM_NULL) {
-        MPI_Comm_rank(row_i_comm, &row_i_rank);
-        MPI_Comm_size(row_i_comm, &row_i_size);
-        int block_size = n / row_i_size;
-        double* row_i_block = (double*) malloc(block_size * sizeof(double));
-        double* row_j_block = (double*) malloc(block_size * sizeof(double));
-        double* row_i_block_updated = (double*) malloc(block_size * sizeof(double));
-        MPI_Scatter(row_i, block_size, MPI_DOUBLE, row_i_block, block_size, MPI_DOUBLE, 0, row_i_comm);
-        MPI_Scatter(row_j, block_size, MPI_DOUBLE, row_j_block, block_size, MPI_DOUBLE, 0, row_i_comm);
-        for (k = 0; k < block_size; k++) {
-            row_i_block_updated[k] = c * row_i_block[k] + s * row_j_block[k];
-        }
-        MPI_Gather(row_i_block_updated, block_size, MPI_DOUBLE, row_i_updated, block_size, MPI_DOUBLE, 0, row_i_comm);
-        if (row_i_rank == 0) {
-            MPI_Send(row_i_updated, n, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-        }
-        free(row_i_block);
-        free(row_j_block);
-        free(row_i_block_updated);
-        MPI_Group_free(&row_i_group);
-        MPI_Comm_free(&row_i_comm);
-    }
-
-    // update row j
-    int row_j_rank = -1;
-    int row_j_size = -1;
     double* row_j_updated = (double*) malloc(n * sizeof(double));
-    if (row_j_comm != MPI_COMM_NULL) {
-        MPI_Comm_rank(row_j_comm, &row_j_rank);
-        MPI_Comm_size(row_j_comm, &row_j_size);
-        int block_size = n / row_j_size;
-        double* row_i_block = (double*) malloc(block_size * sizeof(double));
-        double* row_j_block = (double*) malloc(block_size * sizeof(double));
-        double* row_j_block_updated = (double*) malloc(block_size * sizeof(double));
-        MPI_Scatter(row_i, block_size, MPI_DOUBLE, row_i_block, block_size, MPI_DOUBLE, 0, row_j_comm);
-        MPI_Scatter(row_j, block_size, MPI_DOUBLE, row_j_block, block_size, MPI_DOUBLE, 0, row_j_comm);
-        for (k = 0; k < block_size; k++) {
-            row_j_block_updated[k] = s * row_i_block[k] - c * row_j_block[k];
-        }
-        MPI_Gather(row_j_block_updated, block_size, MPI_DOUBLE, row_j_updated, block_size, MPI_DOUBLE, 0, row_j_comm);
-        if (row_j_rank == 0) {
-            MPI_Send(row_j_updated, n, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-        }
-        free(row_i_block);
-        free(row_j_block);
-        free(row_j_block_updated);
-        MPI_Group_free(&row_j_group);
-        MPI_Comm_free(&row_j_comm);
-    }
+    update_row(row_i, row_j, row_i_updated, row_j_updated, row_i_comm, n, 1, c, s);
+    MPI_Group_free(&row_i_group);
+    MPI_Comm_free(&row_i_comm);
+    update_row(row_i, row_j, row_i_updated, row_j_updated, row_j_comm, n, 0, c, s);
+    MPI_Group_free(&row_j_group);
+    MPI_Comm_free(&row_j_comm);
 
     // in rank 0, update the matrix
     if (rank == 0) {
